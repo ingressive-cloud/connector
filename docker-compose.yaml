@@ -1,0 +1,21 @@
+# WARNING: This Docker Compose is for use in DEVELOPEMENT by INGRESSIVE TEAM ONLY.
+# Please use the docker-compose.yaml file provided by Ingressive for deployment.
+# Go to https://app.ingressive.com/gateways to get started.
+services:
+  connector:
+    build: .
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=development
+      - INGRESSIVE_LISTEN_ADDR=0.0.0.0
+      - INGRESSIVE_ADVERTISE_ADDR=connector
+      - INGRESSIVE_API_URL=http://api-dev:8080
+      - INGRESSIVE_API_KEY_ID=${INGRESSIVE_API_KEY_ID}
+      - INGRESSIVE_API_KEY_SECRET=${INGRESSIVE_API_KEY_SECRET}
+    networks:
+      - bifrost
+
+networks:
+  bifrost:
+    external: true
+    name: bifrost_default
