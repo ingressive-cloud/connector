@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/ingressive/connector/awsv4"
+	"github.com/ingressive-cloud/connector/awsv4"
 )
 
 func TestSignRequest_SetsAuthorizationHeader(t *testing.T) {

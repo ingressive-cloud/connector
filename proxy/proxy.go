@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/ingressive/connector/connector"
+	"github.com/ingressive-cloud/connector/connector"
 )
 
 // hopByHopHeaders are per-connection headers that must not be forwarded.

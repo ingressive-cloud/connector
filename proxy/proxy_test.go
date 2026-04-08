@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ingressive/connector/connector"
-	"github.com/ingressive/connector/proxy"
+	"github.com/ingressive-cloud/connector/connector"
+	"github.com/ingressive-cloud/connector/proxy"
 )
 
 // storeWith returns a Store pre-loaded with the given service URLs.

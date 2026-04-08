@@ -10,9 +10,9 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/ingressive/connector/connector"
-	"github.com/ingressive/connector/netbird"
-	"github.com/ingressive/connector/proxy"
+	"github.com/ingressive-cloud/connector/connector"
+	"github.com/ingressive-cloud/connector/netbird"
+	"github.com/ingressive-cloud/connector/proxy"
 )
 
 func main() {

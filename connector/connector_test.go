@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/ingressive/connector/connector"
+	"github.com/ingressive-cloud/connector/connector"
 )
 
 var upgrader = websocket.Upgrader{

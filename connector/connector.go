@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/ingressive/connector/awsv4"
+	"github.com/ingressive-cloud/connector/awsv4"
 )
 
 const (
