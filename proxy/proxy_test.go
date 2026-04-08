@@ -35,7 +35,7 @@ func TestProxy_AllowedService(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/hello", nil)
 	req.Header.Set("X-Service", up.URL)
 
-	resp, err := app.Test(req, -1)
+	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestProxy_ForbiddenService(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("X-Service", "http://not-in-list.example.com")
 
-	resp, err := app.Test(req, -1)
+	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestProxy_MissingXServiceHeader(t *testing.T) {
 	app := proxy.New(connector.NewStore())
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	resp, err := app.Test(req, -1)
+	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestProxy_StripsXServiceFromUpstream(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("X-Service", up.URL)
 
-	resp, _ := app.Test(req, -1)
+	resp, _ := app.Test(req)
 	resp.Body.Close()
 
 	if seenXService != "" {
@@ -110,7 +110,7 @@ func TestProxy_PreservesHostHeader(t *testing.T) {
 	req.Header.Set("X-Service", up.URL)
 	req.Host = "original.example.com"
 
-	resp, err := app.Test(req, -1)
+	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestProxy_ForwardsPathAndQuery(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/resource?foo=bar&baz=1", nil)
 	req.Header.Set("X-Service", up.URL)
 
-	resp, err := app.Test(req, -1)
+	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestProxy_ForwardsRequestBody(t *testing.T) {
 	req.Header.Set("X-Service", up.URL)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := app.Test(req, -1)
+	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestProxy_ForwardsUpstreamStatusCode(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/missing", nil)
 	req.Header.Set("X-Service", up.URL)
 
-	resp, err := app.Test(req, -1)
+	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestProxy_StreamsLargeResponse(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/big", nil)
 	req.Header.Set("X-Service", up.URL)
 
-	resp, err := app.Test(req, -1)
+	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestProxy_PostMethodForwarded(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/items", nil)
 	req.Header.Set("X-Service", up.URL)
 
-	resp, err := app.Test(req, -1)
+	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test: %v", err)
 	}

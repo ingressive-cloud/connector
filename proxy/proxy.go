@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 	"github.com/ingressive-cloud/connector/connector"
 )
 
@@ -32,12 +32,9 @@ var upstreamClient = &http.Client{}
 // rejected with 403 Forbidden. The Host header from the incoming request is
 // preserved to the upstream.
 func New(store *connector.Store) *fiber.App {
-	app := fiber.New(fiber.Config{
-		DisableStartupMessage: true,
-		StreamRequestBody:     true,
-	})
+	app := fiber.New()
 
-	app.All("/*", func(c *fiber.Ctx) error {
+	app.All("/*", func(c fiber.Ctx) error {
 		target := c.Get("X-Service")
 		if target == "" {
 			return c.Status(fiber.StatusBadRequest).SendString("missing X-Service header")
@@ -55,13 +52,13 @@ func New(store *connector.Store) *fiber.App {
 		}
 
 		// Copy incoming headers, excluding X-Service and hop-by-hop headers.
-		c.Request().Header.VisitAll(func(key, val []byte) {
+		for key, val := range c.Request().Header.All() {
 			k := strings.ToLower(string(key))
-			if k == "x-service" || hopByHopHeaders[k] || k == "host" {
-				return
+			if k == "x-service" || hopByHopHeaders[k] {
+				continue
 			}
 			req.Header.Set(string(key), string(val))
-		})
+		}
 
 		// Preserve the Host header from the incoming request, not the upstream host.
 		req.Host = c.Hostname()

@@ -16,4 +16,8 @@ FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 COPY --from=build /connector /connector
 
+LABEL org.opencontainers.image.description ="Ingressive Cloud Connector and Proxy" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/ingressive-cloud/connector"
+
 ENTRYPOINT ["/connector"]
