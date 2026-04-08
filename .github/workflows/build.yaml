@@ -36,5 +36,5 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/ingressive/connector:latest
-            ghcr.io/ingressive/connector:sha-${{ github.sha }}
+            ghcr.io/ingressive-cloud/connector:latest
+            ghcr.io/ingressive-cloud/connector:sha-${{ github.sha }}

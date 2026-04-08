@@ -1,4 +1,4 @@
-module github.com/ingressive/connector
+module github.com/ingressive-cloud/connector
 
 go 1.26.1
 
