@@ -14,7 +14,7 @@ import (
 // storeWith returns a Store pre-loaded with the given service URLs.
 func storeWith(services ...string) *connector.Store {
 	s := connector.NewStore()
-	s.Update(connector.GatewayConfig{UpdateID: "test", Services: services})
+	s.Update(services)
 	return s
 }
 

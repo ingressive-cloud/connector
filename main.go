@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -11,9 +10,11 @@ import (
 	"syscall"
 
 	"github.com/ingressive-cloud/connector/connector"
-	"github.com/ingressive-cloud/connector/netbird"
-	"github.com/ingressive-cloud/connector/proxy"
+	"github.com/ingressive-cloud/connector/zitihost"
 )
+
+const defaultAPIURL = "https://app.ingressive.cloud"
+const defaultIdentityDir = "/etc/ingressive"
 
 func main() {
 	if err := run(); err != nil {
@@ -22,68 +23,75 @@ func main() {
 	}
 }
 
-const defaultAPIURL = "https://app.ingressive.cloud"
-
 func run() error {
 	apiURL := envOr("INGRESSIVE_API_URL", defaultAPIURL)
+	connectorSlug := mustEnv("CONNECTOR_ID")
 	keyID := mustEnv("INGRESSIVE_API_KEY_ID")
 	keySecret := mustEnv("INGRESSIVE_API_KEY_SECRET")
+	identityDir := envOr("INGRESSIVE_IDENTITY_DIR", defaultIdentityDir)
+	enrollmentJWT := os.Getenv("ENROLLMENT_JWT")
 
-	// Build WebSocket URL: the /connector/ws endpoint derives gateway+connector
-	// IDs from the access key principal, so no gateway ID env var is needed.
-	wsBase := strings.Replace(apiURL, "https://", "wss://", 1)
-	wsBase = strings.Replace(wsBase, "http://", "ws://", 1)
-	wsURL := strings.TrimRight(wsBase, "/") + "/connector/ws"
-
-	// Discover Netbird interface to bind the proxy on.
-	listenIP, err := netbird.FindAddr()
-	if err != nil {
-		return fmt.Errorf("discover netbird interface: %w", err)
+	instanceLabel := envOr("INGRESSIVE_INSTANCE_LABEL", "")
+	if instanceLabel == "" {
+		if h, err := os.Hostname(); err == nil {
+			instanceLabel = h
+		} else {
+			instanceLabel = "connector"
+		}
 	}
 
-	// INGRESSIVE_ADVERTISE_ADDR overrides the address reported to bifrost in
-	// the register message. Used when running in dev
-	advertiseIP := envOr("INGRESSIVE_ADVERTISE_ADDR", listenIP)
+	wsBase := strings.Replace(apiURL, "https://", "wss://", 1)
+	wsBase = strings.Replace(wsBase, "http://", "ws://", 1)
+	wsURL := strings.TrimRight(wsBase, "/") + "/connectors/" + connectorSlug + "/ws"
 
-	bindAddr := listenIP + ":8484"
-	slog.Info("starting", "proxy_addr", bindAddr, "advertise_addr", advertiseIP, "gateway_ws", wsURL)
+	slog.Info("starting", "connector", connectorSlug, "instance", instanceLabel, "ws", wsURL)
 
 	store := connector.NewStore()
 
-	client := &connector.Client{
-		WSURL:     wsURL,
-		KeyID:     keyID,
-		KeySecret: keySecret,
-		Store:     store,
-		NetbirdIP: advertiseIP,
+	wsClient := &connector.Client{
+		WSURL:         wsURL,
+		KeyID:         keyID,
+		KeySecret:     keySecret,
+		InstanceLabel: instanceLabel,
+		Store:         store,
 	}
-
-	app := proxy.New(store)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	var wg sync.WaitGroup
 
-	// WebSocket client — keeps store up to date.
+	// WebSocket control-plane loop.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		client.Run(ctx)
+		wsClient.Run(ctx)
 	}()
 
-	// Fiber proxy server.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		go func() {
-			<-ctx.Done()
-			_ = app.Shutdown()
-		}()
-		if err := app.Listen(bindAddr); err != nil {
-			slog.Error("proxy server error", "err", err)
+	// Ziti data-plane: enroll if needed, then host on the overlay.
+	if err := zitihost.EnsureIdentity(identityDir, enrollmentJWT); err != nil {
+		slog.Warn("ziti identity unavailable — data path disabled", "err", err)
+	} else {
+		zitiCtx, err := zitihost.LoadContext(identityDir)
+		if err != nil {
+			slog.Warn("failed to load ziti context — data path disabled", "err", err)
+		} else {
+			svcName, err := zitihost.ServiceName(zitiCtx)
+			if err != nil {
+				slog.Warn("failed to resolve ziti service name — data path disabled", "err", err)
+			} else {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if err := zitihost.Host(ctx, zitiCtx, svcName, store); err != nil {
+						if ctx.Err() == nil {
+							slog.Error("ziti host error", "err", err)
+						}
+					}
+				}()
+			}
 		}
-	}()
+	}
 
 	wg.Wait()
 	return nil

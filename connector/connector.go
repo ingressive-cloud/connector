@@ -15,32 +15,13 @@ import (
 )
 
 const (
-	// DefaultHeartbeatInterval is how often the connector sends a heartbeat to the server.
-	DefaultHeartbeatInterval = 30 * time.Second
+	heartbeatInterval = 15 * time.Second
+	wsReadDeadline    = 45 * time.Second
 
 	defaultInitBackoff = time.Second
 	maxBackoff         = 60 * time.Second
-
-	// reconnectDelay is the fixed wait before reconnecting after a connection that
-	// was successfully established drops. Short so we recover quickly from transient
-	// network blips without hammering the server on a hard failure.
-	reconnectDelay = 4 * time.Second
+	reconnectDelay     = 4 * time.Second
 )
-
-// GatewayConfig is the message pushed by the server on connect and on every service change.
-type GatewayConfig struct {
-	GatewayID string   `json:"gateway_id"`
-	UpdateID  string   `json:"update_id"`
-	Services  []string `json:"services"`
-}
-
-// ConnectorMessage is sent from this connector to the server.
-type ConnectorMessage struct {
-	Type     string `json:"type"`                // "register", "heartbeat", "ack", or "goodbye"
-	IP       string `json:"ip,omitempty"`        // present on "register"
-	UpdateID string `json:"update_id,omitempty"` // present on "ack"
-	Success  bool   `json:"success,omitempty"`   // present on "ack"
-}
 
 // Store is a thread-safe in-memory set of allowed service URLs.
 type Store struct {
@@ -48,23 +29,20 @@ type Store struct {
 	allowed map[string]struct{}
 }
 
-// NewStore returns an empty Store.
 func NewStore() *Store {
 	return &Store{allowed: make(map[string]struct{})}
 }
 
-// Update atomically replaces the allowed service set with the services from cfg.
-func (s *Store) Update(cfg GatewayConfig) {
+func (s *Store) Update(services []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	next := make(map[string]struct{}, len(cfg.Services))
-	for _, svc := range cfg.Services {
-		next[svc] = struct{}{}
+	next := make(map[string]struct{}, len(services))
+	for _, u := range services {
+		next[u] = struct{}{}
 	}
 	s.allowed = next
 }
 
-// IsAllowed reports whether svcURL is in the current allowed set.
 func (s *Store) IsAllowed(svcURL string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -72,7 +50,6 @@ func (s *Store) IsAllowed(svcURL string) bool {
 	return ok
 }
 
-// AllowedServices returns a snapshot of the current allowed service URLs.
 func (s *Store) AllowedServices() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -83,30 +60,18 @@ func (s *Store) AllowedServices() []string {
 	return out
 }
 
-// Client manages a WebSocket connection to the Bifrost gateway API.
-// It keeps the Store up-to-date and sends periodic heartbeats.
+// Client manages the control-plane WebSocket connection to the Ingressive API.
 type Client struct {
-	// Required.
-	WSURL     string // full WebSocket URL: wss://host/connector/ws
-	KeyID     string // INGRESSIVE_API_KEY_ID (empty skips signing, for tests)
-	KeySecret string // INGRESSIVE_API_KEY_SECRET
-	Store     *Store
-	NetbirdIP string // IP address on the Netbird interface — reported on register
+	WSURL         string
+	KeyID         string
+	KeySecret     string
+	InstanceLabel string
+	Store         *Store
 
 	// Injectable for testing.
-	HeartbeatInterval time.Duration // defaults to DefaultHeartbeatInterval
-	InitialBackoff    time.Duration // defaults to 1s
-	// NewTicker replaces time.NewTicker for heartbeats.
-	NewTicker func(d time.Duration) (<-chan time.Time, func())
-	// Dialer replaces websocket.DefaultDialer.
-	Dialer *websocket.Dialer
-}
-
-func (c *Client) heartbeatInterval() time.Duration {
-	if c.HeartbeatInterval > 0 {
-		return c.HeartbeatInterval
-	}
-	return DefaultHeartbeatInterval
+	InitialBackoff time.Duration
+	NewTicker      func(d time.Duration) (<-chan time.Time, func())
+	Dialer         *websocket.Dialer
 }
 
 func (c *Client) initialBackoff() time.Duration {
@@ -116,20 +81,18 @@ func (c *Client) initialBackoff() time.Duration {
 	return defaultInitBackoff
 }
 
-// Run starts the connection loop, reconnecting with exponential backoff whenever
-// the connection is lost. It blocks until ctx is cancelled.
 func (c *Client) Run(ctx context.Context) {
 	backoff := c.initialBackoff()
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		connected, err := c.Connect(ctx)
+		connected, err := c.connect(ctx)
 		if err != nil && ctx.Err() == nil {
 			if connected {
-				slog.Info("gateway connection dropped", "err", err, "reconnect_in", reconnectDelay)
+				slog.Info("connection dropped", "err", err, "reconnect_in", reconnectDelay)
 			} else {
-				slog.Error("gateway connection failed", "err", err, "reconnect_in", backoff)
+				slog.Error("connection failed", "err", err, "reconnect_in", backoff)
 			}
 		}
 		if ctx.Err() != nil {
@@ -137,8 +100,6 @@ func (c *Client) Run(ctx context.Context) {
 		}
 		var delay time.Duration
 		if connected {
-			// Was connected then dropped — retry quickly and reset backoff so that
-			// any subsequent dial failures start from the beginning of the ramp.
 			delay = reconnectDelay
 			backoff = c.initialBackoff()
 		} else {
@@ -153,12 +114,7 @@ func (c *Client) Run(ctx context.Context) {
 	}
 }
 
-// Connect establishes a single WebSocket session: signs the upgrade, sends
-// heartbeats, processes config updates, and returns when the connection closes.
-// The first return value reports whether the WebSocket dial succeeded; errors
-// after that point (dropped connection, write failures) are returned with
-// connected=true so Run can distinguish a transient drop from a dial failure.
-func (c *Client) Connect(ctx context.Context) (connected bool, _ error) {
+func (c *Client) connect(ctx context.Context) (connected bool, _ error) {
 	req, err := c.buildSignedRequest(ctx)
 	if err != nil {
 		return false, err
@@ -175,13 +131,17 @@ func (c *Client) Connect(ctx context.Context) (connected bool, _ error) {
 	}
 	defer conn.Close()
 
-	slog.Info("connected to gateway", "url", c.WSURL)
+	_ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
 
-	// Send register message immediately so the server knows our IP.
-	regMsg := ConnectorMessage{Type: "register", IP: c.NetbirdIP}
-	regData, _ := json.Marshal(regMsg)
-	if err := conn.WriteMessage(websocket.TextMessage, regData); err != nil {
-		return true, fmt.Errorf("write register: %w", err)
+	slog.Info("connected", "url", c.WSURL, "instance", c.InstanceLabel)
+
+	// Send hello so the server registers this replica.
+	hello, _ := json.Marshal(map[string]string{
+		"type":           "hello",
+		"instance_label": c.InstanceLabel,
+	})
+	if err := conn.WriteMessage(websocket.TextMessage, hello); err != nil {
+		return true, fmt.Errorf("write hello: %w", err)
 	}
 
 	newTicker := c.NewTicker
@@ -191,7 +151,7 @@ func (c *Client) Connect(ctx context.Context) (connected bool, _ error) {
 			return t.C, t.Stop
 		}
 	}
-	tickCh, stopTicker := newTicker(c.heartbeatInterval())
+	tickCh, stopTicker := newTicker(heartbeatInterval)
 	defer stopTicker()
 
 	type readResult struct {
@@ -213,19 +173,16 @@ func (c *Client) Connect(ctx context.Context) (connected bool, _ error) {
 	for {
 		select {
 		case <-ctx.Done():
-			// Graceful goodbye so the server can immediately remove us from the upstream pool.
-			gb := ConnectorMessage{Type: "goodbye"}
-			gbData, _ := json.Marshal(gb)
-			_ = conn.WriteMessage(websocket.TextMessage, gbData)
+			bye, _ := json.Marshal(map[string]string{"type": "goodbye"})
+			_ = conn.WriteMessage(websocket.TextMessage, bye)
 			_ = conn.WriteMessage(websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseGoingAway, ""))
 			return true, nil
 
 		case <-tickCh:
-			hb := ConnectorMessage{Type: "heartbeat"}
-			data, _ := json.Marshal(hb)
-			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-				return true, fmt.Errorf("write heartbeat: %w", err)
+			pong, _ := json.Marshal(map[string]string{"type": "pong"})
+			if err := conn.WriteMessage(websocket.TextMessage, pong); err != nil {
+				return true, fmt.Errorf("write pong: %w", err)
 			}
 
 		case res := <-msgCh:
@@ -235,42 +192,40 @@ func (c *Client) Connect(ctx context.Context) (connected bool, _ error) {
 				}
 				return true, fmt.Errorf("read: %w", res.err)
 			}
-			if err := c.handleMessage(conn, res.data); err != nil {
-				return true, err
-			}
+			_ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
+			c.handleMessage(res.data)
 		}
 	}
 }
 
-func (c *Client) handleMessage(conn *websocket.Conn, data []byte) error {
-	var cfg GatewayConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		slog.Warn("ignoring unparseable message from server", "err", err)
-		return nil
+func (c *Client) handleMessage(data []byte) {
+	var msg struct {
+		Type     string `json:"type"`
+		Services []struct {
+			URL string `json:"url"`
+		} `json:"services"`
 	}
-	if cfg.UpdateID == "" {
-		return nil
+	if err := json.Unmarshal(data, &msg); err != nil {
+		slog.Warn("ignoring unparseable message", "err", err)
+		return
 	}
 
-	c.Store.Update(cfg)
-	slog.Info("config updated", "update_id", cfg.UpdateID, "services", len(cfg.Services))
-
-	ack := ConnectorMessage{
-		Type:     "ack",
-		UpdateID: cfg.UpdateID,
-		Success:  true,
+	switch msg.Type {
+	case "allowlist_update":
+		urls := make([]string, 0, len(msg.Services))
+		for _, s := range msg.Services {
+			urls = append(urls, s.URL)
+		}
+		c.Store.Update(urls)
+		slog.Info("allowlist updated", "services", urls)
+	case "ping":
+		// server-initiated ping — nothing to do, pong is sent on the ticker
+	default:
+		slog.Debug("unknown server message", "type", msg.Type)
 	}
-	ackData, _ := json.Marshal(ack)
-	if err := conn.WriteMessage(websocket.TextMessage, ackData); err != nil {
-		return fmt.Errorf("write ack: %w", err)
-	}
-	return nil
 }
 
-// buildSignedRequest builds an HTTP GET suitable for the WebSocket upgrade
-// handshake, signed with AWSv4. Signing is skipped if KeyID is empty (tests).
 func (c *Client) buildSignedRequest(ctx context.Context) (*http.Request, error) {
-	// AWSv4 requires an https:// URL; convert wss→https, ws→http.
 	signingURL := strings.Replace(c.WSURL, "wss://", "https://", 1)
 	signingURL = strings.Replace(signingURL, "ws://", "http://", 1)
 
