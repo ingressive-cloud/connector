@@ -90,9 +90,9 @@ func (c *Client) Run(ctx context.Context) {
 		connected, err := c.connect(ctx)
 		if err != nil && ctx.Err() == nil {
 			if connected {
-				slog.Info("connection dropped", "err", err, "reconnect_in", reconnectDelay)
+				slog.Warn("Ingressive API connection dropped", "err", err, "reconnect_in", reconnectDelay)
 			} else {
-				slog.Error("connection failed", "err", err, "reconnect_in", backoff)
+				slog.Error("Cannot reach Ingressive API", "err", err, "reconnect_in", backoff)
 			}
 		}
 		if ctx.Err() != nil {
@@ -133,7 +133,7 @@ func (c *Client) connect(ctx context.Context) (connected bool, _ error) {
 
 	_ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
 
-	slog.Info("connected", "url", c.WSURL, "instance", c.InstanceLabel)
+	slog.Info("Connected to the Ingressive API")
 
 	// Send hello so the server registers this replica.
 	hello, _ := json.Marshal(map[string]string{
@@ -217,7 +217,7 @@ func (c *Client) handleMessage(data []byte) {
 			urls = append(urls, s.URL)
 		}
 		c.Store.Update(urls)
-		slog.Info("allowlist updated", "services", urls)
+		slog.Info("Routing services", "count", len(urls), "services", urls)
 	case "ping":
 		// server-initiated ping — nothing to do, pong is sent on the ticker
 	default:

@@ -39,14 +39,14 @@ var hopByHopHeaders = map[string]bool{
 func EnsureIdentity(dir, jwt string) error {
 	identityPath := filepath.Join(dir, identityFile)
 	if _, err := os.Stat(identityPath); err == nil {
-		slog.Info("ziti identity found", "path", identityPath)
+		slog.Info("Identity loaded", "path", identityPath)
 		return nil
 	}
 	if jwt == "" {
 		return fmt.Errorf("identity not found at %s and ENROLLMENT_JWT is not set", identityPath)
 	}
 
-	slog.Info("enrolling ziti identity", "dir", dir)
+	slog.Info("Enrolling new identity")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create identity dir: %w", err)
 	}
@@ -74,7 +74,7 @@ func EnsureIdentity(dir, jwt string) error {
 	if err := os.WriteFile(identityPath, data, 0600); err != nil {
 		return fmt.Errorf("write identity: %w", err)
 	}
-	slog.Info("ziti enrollment complete", "path", identityPath)
+	slog.Info("Identity enrolled — persist this directory on a volume to avoid re-enrollment on restart", "path", identityPath)
 	return nil
 }
 
@@ -93,10 +93,10 @@ func ServiceName(zitiCtx ziti.Context) (string, error) {
 		return "", fmt.Errorf("get current identity: %w", err)
 	}
 	if id.Name == nil || *id.Name == "" {
-		return "", fmt.Errorf("ziti identity has no name")
+		return "", fmt.Errorf("identity has no name")
 	}
 	svc := "connector-" + *id.Name
-	slog.Info("ziti service name resolved", "service", svc)
+	slog.Debug("service name resolved", "service", svc)
 	return svc, nil
 }
 
@@ -106,9 +106,10 @@ func ServiceName(zitiCtx ziti.Context) (string, error) {
 func Host(ctx context.Context, zitiCtx ziti.Context, serviceName string, store *connector.Store) error {
 	listener, err := zitiCtx.Listen(serviceName)
 	if err != nil {
-		return fmt.Errorf("ziti listen %q: %w", serviceName, err)
+		return fmt.Errorf("listen %q: %w", serviceName, err)
 	}
-	slog.Info("ziti listener ready", "service", serviceName)
+	slog.Info("✓ Ready to route traffic with Ingressive")
+	slog.Debug("mesh listener bound", "service", serviceName)
 
 	go func() {
 		<-ctx.Done()

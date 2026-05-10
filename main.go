@@ -2,15 +2,16 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 
 	"github.com/ingressive-cloud/connector/connector"
 	"github.com/ingressive-cloud/connector/zitihost"
+	"golang.org/x/sync/errgroup"
 )
 
 const defaultAPIURL = "https://app.ingressive.cloud"
@@ -44,7 +45,7 @@ func run() error {
 	wsBase = strings.Replace(wsBase, "http://", "ws://", 1)
 	wsURL := strings.TrimRight(wsBase, "/") + "/connectors/" + connectorSlug + "/ws"
 
-	slog.Info("starting", "connector", connectorSlug, "instance", instanceLabel, "ws", wsURL)
+	slog.Info("Connector starting", "instance", instanceLabel)
 
 	store := connector.NewStore()
 
@@ -59,42 +60,44 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	var wg sync.WaitGroup
-
-	// WebSocket control-plane loop.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		wsClient.Run(ctx)
-	}()
-
-	// Ziti data-plane: enroll if needed, then host on the overlay.
+	// Mesh data-plane setup is synchronous and must succeed before we start
+	// running. A failure here means the connector cannot route customer
+	// traffic, so it must exit non-zero rather than degrade to a control-plane
+	// shell that misleads the API into thinking the connector is healthy.
 	if err := zitihost.EnsureIdentity(identityDir, enrollmentJWT); err != nil {
-		slog.Warn("ziti identity unavailable — data path disabled", "err", err)
-	} else {
-		zitiCtx, err := zitihost.LoadContext(identityDir)
-		if err != nil {
-			slog.Warn("failed to load ziti context — data path disabled", "err", err)
-		} else {
-			svcName, err := zitihost.ServiceName(zitiCtx)
-			if err != nil {
-				slog.Warn("failed to resolve ziti service name — data path disabled", "err", err)
-			} else {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					if err := zitihost.Host(ctx, zitiCtx, svcName, store); err != nil {
-						if ctx.Err() == nil {
-							slog.Error("ziti host error", "err", err)
-						}
-					}
-				}()
-			}
-		}
+		return fmt.Errorf("identity: %w", err)
+	}
+	zitiCtx, err := zitihost.LoadContext(identityDir)
+	if err != nil {
+		return fmt.Errorf("mesh context: %w", err)
+	}
+	svcName, err := zitihost.ServiceName(zitiCtx)
+	if err != nil {
+		return fmt.Errorf("resolve service name: %w", err)
 	}
 
-	wg.Wait()
-	return nil
+	// Run both subsystems in an errgroup so either one exiting (cleanly or
+	// otherwise) cancels the other and brings the process down.
+	g, gctx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		wsClient.Run(gctx)
+		// Run only returns on context cancel; if it returns for any other
+		// reason that's a bug, but treat it as a fatal exit either way.
+		return nil
+	})
+
+	g.Go(func() error {
+		if err := zitihost.Host(gctx, zitiCtx, svcName, store); err != nil {
+			if gctx.Err() != nil {
+				return nil // shutting down — not a fatal error
+			}
+			return fmt.Errorf("mesh: %w", err)
+		}
+		return nil
+	})
+
+	return g.Wait()
 }
 
 func mustEnv(key string) string {
