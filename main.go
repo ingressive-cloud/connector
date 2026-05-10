@@ -26,7 +26,6 @@ func main() {
 
 func run() error {
 	apiURL := envOr("INGRESSIVE_API_URL", defaultAPIURL)
-	connectorSlug := mustEnv("CONNECTOR_ID")
 	keyID := mustEnv("INGRESSIVE_API_KEY_ID")
 	keySecret := mustEnv("INGRESSIVE_API_KEY_SECRET")
 	identityDir := envOr("INGRESSIVE_IDENTITY_DIR", defaultIdentityDir)
@@ -41,9 +40,11 @@ func run() error {
 		}
 	}
 
+	// The connector's identity is the API key principal — the server
+	// derives the connector from the credential, not from a URL slug.
 	wsBase := strings.Replace(apiURL, "https://", "wss://", 1)
 	wsBase = strings.Replace(wsBase, "http://", "ws://", 1)
-	wsURL := strings.TrimRight(wsBase, "/") + "/connectors/" + connectorSlug + "/ws"
+	wsURL := strings.TrimRight(wsBase, "/") + "/connectors/ws"
 
 	slog.Info("Connector starting", "instance", instanceLabel)
 

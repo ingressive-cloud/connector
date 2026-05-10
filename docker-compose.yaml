@@ -5,7 +5,6 @@ services:
     build: .
     restart: unless-stopped
     environment:
-      CONNECTOR_ID: ${CONNECTOR_ID}
       INGRESSIVE_API_URL: ${INGRESSIVE_API_URL:-http://api-dev:8080}
       INGRESSIVE_API_KEY_ID: ${INGRESSIVE_API_KEY_ID}
       INGRESSIVE_API_KEY_SECRET: ${INGRESSIVE_API_KEY_SECRET}
@@ -13,7 +12,7 @@ services:
       ENROLLMENT_JWT: ${ENROLLMENT_JWT:-}
       INGRESSIVE_INSTANCE_LABEL: ${INGRESSIVE_INSTANCE_LABEL:-}
     volumes:
-      - identity:/etc/ingressive
+      - ingressive-identity:/etc/ingressive
     networks:
       - bifrost
 
