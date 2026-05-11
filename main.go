@@ -14,7 +14,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const defaultAPIURL = "https://app.ingressive.cloud"
+const defaultAPIURL = "https://console.ingressive.cloud"
 const defaultIdentityDir = "/etc/ingressive"
 
 func main() {
