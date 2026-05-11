@@ -65,10 +65,11 @@ func run() error {
 	// running. A failure here means the connector cannot route customer
 	// traffic, so it must exit non-zero rather than degrade to a control-plane
 	// shell that misleads the API into thinking the connector is healthy.
-	if err := zitihost.EnsureIdentity(identityDir, enrollmentJWT); err != nil {
-		return fmt.Errorf("identity: %w", err)
-	}
-	zitiCtx, err := zitihost.LoadContext(identityDir)
+	//
+	// EnsureWorkingContext also handles the case where the cached identity
+	// has been revoked on the controller: it deletes the stale file and
+	// re-enrolls via ENROLLMENT_JWT if one is provided.
+	zitiCtx, err := zitihost.EnsureWorkingContext(identityDir, enrollmentJWT)
 	if err != nil {
 		return fmt.Errorf("mesh context: %w", err)
 	}
@@ -96,6 +97,13 @@ func run() error {
 			return fmt.Errorf("mesh: %w", err)
 		}
 		return nil
+	})
+
+	// Watchdog: if we get kicked off the Ziti network, exit non-zero rather
+	// than let the SDK loop logging the same failure forever. The supervisor
+	// will restart us; on restart EnsureWorkingContext re-enrolls if possible.
+	g.Go(func() error {
+		return zitihost.WatchHealth(gctx, zitiCtx)
 	})
 
 	return g.Wait()

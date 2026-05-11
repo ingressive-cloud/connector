@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ingressive-cloud/connector/connector"
 	"github.com/openziti/sdk-golang/ziti"
@@ -81,6 +82,78 @@ func EnsureIdentity(dir, jwt string) error {
 // LoadContext loads a Ziti context from the identity.json in dir.
 func LoadContext(dir string) (ziti.Context, error) {
 	return ziti.NewContextFromFile(filepath.Join(dir, identityFile))
+}
+
+// EnsureWorkingContext loads the identity in dir and verifies it can talk to
+// the Ziti controller. If verification fails and jwt is non-empty, the cached
+// identity is deleted and re-enrolled once. Returns the verified context or
+// the underlying error. Used on startup so a revoked identity self-heals.
+func EnsureWorkingContext(dir, jwt string) (ziti.Context, error) {
+	attempt := func() (ziti.Context, error) {
+		if err := EnsureIdentity(dir, jwt); err != nil {
+			return nil, err
+		}
+		c, err := LoadContext(dir)
+		if err != nil {
+			return nil, err
+		}
+		// Hit the controller to verify the identity is still valid.
+		if _, err := c.GetCurrentIdentity(); err != nil {
+			return nil, err
+		}
+		return c, nil
+	}
+
+	c, err := attempt()
+	if err == nil {
+		return c, nil
+	}
+	if jwt == "" {
+		return nil, fmt.Errorf("identity unusable and no ENROLLMENT_JWT to re-enroll: %w", err)
+	}
+
+	slog.Warn("identity verification failed — re-enrolling", "err", err)
+	if rmErr := os.Remove(filepath.Join(dir, identityFile)); rmErr != nil && !os.IsNotExist(rmErr) {
+		return nil, fmt.Errorf("remove stale identity: %w", rmErr)
+	}
+	c, err = attempt()
+	if err != nil {
+		return nil, fmt.Errorf("after re-enrollment: %w", err)
+	}
+	return c, nil
+}
+
+// WatchHealth polls the Ziti controller to detect the connector being kicked
+// from the network. Returns nil on context cancel, or a non-nil error after
+// the controller has been unreachable for `threshold` consecutive polls.
+// The caller should propagate the error up so the process exits — letting the
+// process restart via the supervisor is cleaner than letting the SDK loop
+// indefinitely logging the same failure.
+func WatchHealth(ctx context.Context, zitiCtx ziti.Context) error {
+	const (
+		interval  = 30 * time.Second
+		threshold = 3
+	)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	failures := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if _, err := zitiCtx.GetCurrentIdentity(); err != nil {
+				failures++
+				slog.Warn("ziti health check failed", "err", err, "consecutive_failures", failures)
+				if failures >= threshold {
+					return fmt.Errorf("ziti unreachable after %d consecutive failures: %w", failures, err)
+				}
+			} else if failures > 0 {
+				slog.Info("ziti recovered")
+				failures = 0
+			}
+		}
+	}
 }
 
 // ServiceName returns the Ziti service name this connector should host.
