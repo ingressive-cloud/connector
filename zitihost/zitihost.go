@@ -84,9 +84,8 @@ func LoadContext(dir string) (ziti.Context, error) {
 }
 
 // ServiceName returns the Ziti service name this connector should host.
-// It authenticates the context, reads the identity name, and returns
-// "connector-<identityName>". The identity name equals the connector UUID
-// set by the management reconciler at provisioning time.
+// Identity name and service name are identical: "connector-<uuid>", set by
+// management when the connector is provisioned.
 func ServiceName(zitiCtx ziti.Context) (string, error) {
 	id, err := zitiCtx.GetCurrentIdentity()
 	if err != nil {
@@ -95,9 +94,8 @@ func ServiceName(zitiCtx ziti.Context) (string, error) {
 	if id.Name == nil || *id.Name == "" {
 		return "", fmt.Errorf("identity has no name")
 	}
-	svc := "connector-" + *id.Name
-	slog.Debug("service name resolved", "service", svc)
-	return svc, nil
+	slog.Debug("service name resolved", "service", *id.Name)
+	return *id.Name, nil
 }
 
 // Host starts serving HTTP on the named Ziti service until ctx is cancelled.
