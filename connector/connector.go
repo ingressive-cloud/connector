@@ -66,7 +66,10 @@ type Client struct {
 	KeyID         string
 	KeySecret     string
 	InstanceLabel string
-	Store         *Store
+	// Version is the connector binary version reported to the server in the
+	// Hello message. Empty is permitted — the server treats that as "unknown".
+	Version string
+	Store   *Store
 
 	// Injectable for testing.
 	InitialBackoff time.Duration
@@ -136,10 +139,14 @@ func (c *Client) connect(ctx context.Context) (connected bool, _ error) {
 	slog.Info("Connected to the Ingressive API")
 
 	// Send hello so the server registers this replica.
-	hello, _ := json.Marshal(map[string]string{
+	helloMsg := map[string]string{
 		"type":           "hello",
 		"instance_label": c.InstanceLabel,
-	})
+	}
+	if c.Version != "" {
+		helloMsg["version"] = c.Version
+	}
+	hello, _ := json.Marshal(helloMsg)
 	if err := conn.WriteMessage(websocket.TextMessage, hello); err != nil {
 		return true, fmt.Errorf("write hello: %w", err)
 	}

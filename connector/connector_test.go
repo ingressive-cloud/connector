@@ -140,7 +140,11 @@ func TestStore_ConcurrentAccess(t *testing.T) {
 // --- Client / connect tests ---
 
 func TestClient_SendsHello(t *testing.T) {
-	helloCh := make(chan string, 1)
+	type helloFields struct {
+		Label   string
+		Version string
+	}
+	helloCh := make(chan helloFields, 1)
 	srv := newWSServer(t, func(conn *websocket.Conn) {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		_, data, err := conn.ReadMessage()
@@ -150,23 +154,62 @@ func TestClient_SendsHello(t *testing.T) {
 		var m struct {
 			Type          string `json:"type"`
 			InstanceLabel string `json:"instance_label"`
+			Version       string `json:"version"`
 		}
 		if json.Unmarshal(data, &m) == nil && m.Type == "hello" {
-			helloCh <- m.InstanceLabel
+			helloCh <- helloFields{Label: m.InstanceLabel, Version: m.Version}
 		}
 	})
 	defer srv.Close()
 
 	store := connector.NewStore()
-	client := &connector.Client{WSURL: wsURL(srv), Store: store, InstanceLabel: "unit-test"}
+	// Pass through a version; the server should see it in the Hello payload.
+	client := &connector.Client{WSURL: wsURL(srv), Store: store, InstanceLabel: "unit-test", Version: "0.1.2-test"}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	go client.Run(ctx)
 
 	select {
-	case label := <-helloCh:
-		if label != "unit-test" {
-			t.Errorf("expected instance_label=unit-test, got %q", label)
+	case got := <-helloCh:
+		if got.Label != "unit-test" {
+			t.Errorf("expected instance_label=unit-test, got %q", got.Label)
+		}
+		if got.Version != "0.1.2-test" {
+			t.Errorf("expected version=0.1.2-test, got %q", got.Version)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no hello received within 2s")
+	}
+}
+
+// TestClient_SendsHello_NoVersion confirms that when Version is empty the
+// "version" field is omitted from the Hello message entirely.
+func TestClient_SendsHello_NoVersion(t *testing.T) {
+	type helloRaw map[string]any
+	helloCh := make(chan helloRaw, 1)
+	srv := newWSServer(t, func(conn *websocket.Conn) {
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		var m helloRaw
+		if json.Unmarshal(data, &m) == nil {
+			helloCh <- m
+		}
+	})
+	defer srv.Close()
+
+	store := connector.NewStore()
+	client := &connector.Client{WSURL: wsURL(srv), Store: store, InstanceLabel: "no-ver"}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go client.Run(ctx)
+
+	select {
+	case got := <-helloCh:
+		if _, ok := got["version"]; ok {
+			t.Errorf("expected no 'version' key in Hello when unset, got %v", got)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no hello received within 2s")

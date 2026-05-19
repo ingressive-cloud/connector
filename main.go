@@ -17,6 +17,14 @@ import (
 const defaultAPIURL = "https://console.ingressive.cloud"
 const defaultIdentityDir = "/etc/ingressive"
 
+// Version is the connector binary version. Overridden at build time via
+//
+//	go build -ldflags "-X main.Version=$VERSION"
+//
+// It's surfaced to the Ingressive API via the Hello message so the console can
+// show which version is running on each replica.
+var Version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("fatal", "err", err)
@@ -55,6 +63,7 @@ func run() error {
 		KeyID:         keyID,
 		KeySecret:     keySecret,
 		InstanceLabel: instanceLabel,
+		Version:       Version,
 		Store:         store,
 	}
 
