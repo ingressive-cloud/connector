@@ -34,9 +34,45 @@ var hopByHopHeaders = map[string]bool{
 	"upgrade":             true,
 }
 
+// Enroll exchanges a one-time Ziti enrollment JWT for a permanent identity
+// config (key + cert + controller URL), serialized as identity.json bytes.
+// Pure — no disk I/O, no globals. Callers that want to cache the result
+// somewhere durable (a K8s Secret, a file on disk, anywhere) take the bytes
+// and persist them themselves.
+//
+// This is the function the Ingressive controller calls during initial
+// bootstrap so the enrollment happens exactly once per identity; the
+// connector binary then mounts the resulting identity.json from a K8s Secret
+// and never enrolls.
+func Enroll(jwt string) ([]byte, error) {
+	if jwt == "" {
+		return nil, fmt.Errorf("enroll: jwt is empty")
+	}
+	claims, jwtToken, err := enroll.ParseToken(jwt)
+	if err != nil {
+		return nil, fmt.Errorf("parse enrollment JWT: %w", err)
+	}
+	flags := enroll.EnrollmentFlags{
+		JwtString: jwt,
+		Token:     claims,
+		JwtToken:  jwtToken,
+		KeyAlg:    ziti.KeyAlgVar("EC"),
+	}
+	cfg, err := enroll.Enroll(flags)
+	if err != nil {
+		return nil, fmt.Errorf("enroll: %w", err)
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal identity config: %w", err)
+	}
+	return data, nil
+}
+
 // EnsureIdentity checks for an existing identity.json in dir. If missing and
-// jwt is non-empty, it enrolls against the Ziti controller and writes the
-// resulting identity to dir. Returns an error if neither is available.
+// jwt is non-empty, it enrolls against the Ziti controller via Enroll and
+// writes the resulting identity to dir. Returns an error if neither is
+// available.
 func EnsureIdentity(dir, jwt string) error {
 	identityPath := filepath.Join(dir, identityFile)
 	if _, err := os.Stat(identityPath); err == nil {
@@ -52,25 +88,9 @@ func EnsureIdentity(dir, jwt string) error {
 		return fmt.Errorf("create identity dir: %w", err)
 	}
 
-	claims, jwtToken, err := enroll.ParseToken(jwt)
+	data, err := Enroll(jwt)
 	if err != nil {
-		return fmt.Errorf("parse enrollment JWT: %w", err)
-	}
-
-	flags := enroll.EnrollmentFlags{
-		JwtString: jwt,
-		Token:     claims,
-		JwtToken:  jwtToken,
-		KeyAlg:    ziti.KeyAlgVar("EC"),
-	}
-	cfg, err := enroll.Enroll(flags)
-	if err != nil {
-		return fmt.Errorf("enroll: %w", err)
-	}
-
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal identity config: %w", err)
+		return err
 	}
 	if err := os.WriteFile(identityPath, data, 0600); err != nil {
 		return fmt.Errorf("write identity: %w", err)
