@@ -4,13 +4,13 @@ go 1.26.1
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.5
-	github.com/gofiber/fiber/v3 v3.1.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/openziti/sdk-golang v1.7.0
+	golang.org/x/sync v0.20.0
 )
 
 require (
 	github.com/Jeffail/gabs v1.4.0 // indirect
-	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/aws/smithy-go v1.24.2 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -44,14 +44,11 @@ require (
 	github.com/go-openapi/validate v0.25.2 // indirect
 	github.com/go-resty/resty/v2 v2.17.2 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
-	github.com/gofiber/schema v1.7.0 // indirect
-	github.com/gofiber/utils/v2 v2.0.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/kataras/go-events v0.0.3 // indirect
-	github.com/klauspost/compress v1.18.4 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -67,12 +64,10 @@ require (
 	github.com/openziti/foundation/v2 v2.0.90 // indirect
 	github.com/openziti/identity v1.0.128 // indirect
 	github.com/openziti/metrics v1.4.5 // indirect
-	github.com/openziti/sdk-golang v1.7.0 // indirect
 	github.com/openziti/secretstream v0.1.49 // indirect
 	github.com/openziti/transport/v2 v2.0.215 // indirect
 	github.com/orcaman/concurrent-map/v2 v2.0.1 // indirect
 	github.com/parallaxsecond/parsec-client-go v0.0.0-20221025095442-f0a77d263cf9 // indirect
-	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9 // indirect
@@ -80,11 +75,8 @@ require (
 	github.com/shoenig/go-m1cpu v0.1.6 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/speps/go-hashids v2.0.0+incompatible // indirect
-	github.com/tinylib/msgp v1.6.3 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
-	github.com/valyala/bytebufferpool v1.0.0 // indirect
-	github.com/valyala/fasthttp v1.69.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zitadel/logging v0.7.0 // indirect
 	github.com/zitadel/oidc/v3 v3.45.6 // indirect
@@ -98,7 +90,6 @@ require (
 	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/term v0.41.0 // indirect
 	golang.org/x/text v0.35.0 // indirect

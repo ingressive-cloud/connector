@@ -3,13 +3,15 @@
 package zitihost
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,18 +23,6 @@ import (
 )
 
 const identityFile = "identity.json"
-
-// hopByHopHeaders are stripped before forwarding to the upstream.
-var hopByHopHeaders = map[string]bool{
-	"connection":          true,
-	"keep-alive":          true,
-	"proxy-authenticate":  true,
-	"proxy-authorization": true,
-	"te":                  true,
-	"trailers":            true,
-	"transfer-encoding":   true,
-	"upgrade":             true,
-}
 
 // Enroll exchanges a one-time Ziti enrollment JWT for a permanent identity
 // config (key + cert + controller URL), serialized as identity.json bytes.
@@ -117,7 +107,6 @@ func EnsureWorkingContext(dir, jwt string) (ziti.Context, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Hit the controller to verify the identity is still valid.
 		if _, err := c.GetCurrentIdentity(); err != nil {
 			return nil, err
 		}
@@ -202,12 +191,81 @@ func Host(ctx context.Context, zitiCtx ziti.Context, serviceName string, store *
 	slog.Info("✓ Ready to route traffic with Ingressive")
 	slog.Debug("mesh listener bound", "service", serviceName)
 
-	go func() {
-		<-ctx.Done()
-		_ = listener.Close()
-	}()
+	server := &http.Server{
+		Handler:           newProxyHandler(store),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 
-	return http.Serve(listener, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.Serve(listener) }()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+		return nil
+	case err := <-serveErr:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
+}
+
+// newProxyHandler returns the HTTP handler that validates the X-Service header
+// and forwards the request to that upstream via httputil.ReverseProxy.
+//
+// ReverseProxy does the things a hand-rolled proxy almost always forgets:
+// it streams bodies, strips Connection-listed hop-by-hop headers (not just a
+// fixed set), preserves trailers, forwards Upgrade/WebSocket via hijacking,
+// flushes streaming responses, and propagates client cancellation. Our only
+// custom logic is choosing the upstream URL from the X-Service header.
+func newProxyHandler(store *connector.Store) http.Handler {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,
+	}
+
+	rp := &httputil.ReverseProxy{
+		Transport: transport,
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			// X-Service has already been validated and parsed by the outer
+			// handler — it stashed the parsed *url.URL on the request context.
+			target := pr.In.Context().Value(targetURLKey{}).(*url.URL)
+
+			pr.Out.URL.Scheme = target.Scheme
+			pr.Out.URL.Host = target.Host
+			// If the allowlist entry carries a path prefix (e.g.
+			// http://internal/api), prepend it to the request path.
+			if target.Path != "" && target.Path != "/" {
+				pr.Out.URL.Path = strings.TrimRight(target.Path, "/") + pr.Out.URL.Path
+			}
+			// Preserve the client's Host header to the upstream — many origins
+			// vhost on it.
+			pr.Out.Host = pr.In.Host
+			pr.Out.Header.Del("X-Service")
+			pr.SetXForwarded()
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			// Don't log client disconnects as errors.
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			slog.Warn("upstream error", "err", err, "target", r.Header.Get("X-Service"))
+			http.Error(w, "upstream error", http.StatusBadGateway)
+		},
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		target := r.Header.Get("X-Service")
 		if target == "" {
 			http.Error(w, "missing X-Service header", http.StatusBadRequest)
@@ -217,48 +275,16 @@ func Host(ctx context.Context, zitiCtx ziti.Context, serviceName string, store *
 			http.Error(w, "service not in allowed list", http.StatusForbidden)
 			return
 		}
-
-		upstreamURL := strings.TrimRight(target, "/") + r.RequestURI
-
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "read body: "+err.Error(), http.StatusBadGateway)
+		u, err := url.Parse(target)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			http.Error(w, "invalid X-Service header", http.StatusBadRequest)
 			return
 		}
-
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(body))
-		if err != nil {
-			http.Error(w, "build upstream request: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		req.Host = r.Host
-
-		for k, vs := range r.Header {
-			lower := strings.ToLower(k)
-			if lower == "x-service" || hopByHopHeaders[lower] {
-				continue
-			}
-			for _, v := range vs {
-				req.Header.Add(k, v)
-			}
-		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-
-		for k, vs := range resp.Header {
-			if hopByHopHeaders[strings.ToLower(k)] {
-				continue
-			}
-			for _, v := range vs {
-				w.Header().Add(k, v)
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
-	}))
+		ctx := context.WithValue(r.Context(), targetURLKey{}, u)
+		rp.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
+
+// targetURLKey is a private context key for passing the parsed X-Service URL
+// from the outer handler into ReverseProxy.Rewrite without re-parsing.
+type targetURLKey struct{}
