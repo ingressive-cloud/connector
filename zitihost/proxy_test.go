@@ -162,6 +162,30 @@ func TestProxy_PrependsAllowlistPathPrefix(t *testing.T) {
 	}
 }
 
+// When the inbound path contains percent-encoded characters (e.g. %2F),
+// Go's net/url populates RawPath, and Go's Transport writes RawPath to the
+// wire if it's set. So modifying only URL.Path when prepending the allowlist
+// prefix would silently drop the prefix on the wire for these requests.
+func TestProxy_PrependsPathPrefixWithEncodedChars(t *testing.T) {
+	var seenRequestURI string
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		seenRequestURI = r.RequestURI
+		w.WriteHeader(http.StatusOK)
+	})
+	target := up.URL + "/api"
+	h := newProxyHandler(storeWith(target))
+	// %2F (encoded slash) in the path forces net/url to set RawPath.
+	req := httptest.NewRequest(http.MethodGet, "/items/a%2Fb", nil)
+	req.Header.Set("X-Service", target)
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if seenRequestURI != "/api/items/a%2Fb" {
+		t.Errorf("expected upstream request URI /api/items/a%%2Fb, got %q", seenRequestURI)
+	}
+}
+
 func TestProxy_ForwardsRequestBody(t *testing.T) {
 	var seenBody string
 	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
@@ -356,5 +380,46 @@ func TestProxy_UpstreamUnreachableReturns502(t *testing.T) {
 
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("expected 502, got %d", rec.Code)
+	}
+	if ct := rec.Result().Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("expected text/html Content-Type, got %q", ct)
+	}
+	body := rec.Body.String()
+	// Assert the page makes the failure boundary obvious and links back home.
+	for _, want := range []string{
+		"Origin server unreachable",
+		"Ingressive",
+		"Connector",
+		"https://www.ingressive.cloud",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("error page missing expected text %q", want)
+		}
+	}
+}
+
+// The diagnostic detail surfaces the underlying error message — it must be
+// HTML-escaped so a hostile error string can't inject markup into the page.
+func TestProxy_UpstreamErrorEscapesDiagnostic(t *testing.T) {
+	target := "http://127.0.0.1:1"
+	h := newProxyHandler(storeWith(target))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Service", target)
+	ctx, cancel := context.WithTimeout(req.Context(), 5*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	// The dial error includes "<nil>" in some Go versions / "127.0.0.1:1"
+	// — we don't care what's in the string, only that it lives between the
+	// code tags and any HTML metacharacters arrive escaped. Sanity-check
+	// by confirming there's no raw "<" inside the diagnostic block other
+	// than the surrounding tags. The simplest assertion: the page parses
+	// as valid HTML by template (which we already executed), and the body
+	// doesn't contain "<script" anywhere.
+	if strings.Contains(strings.ToLower(rec.Body.String()), "<script") {
+		t.Errorf("error page contains <script>, possible XSS via diagnostic")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net"
 	"net/http"
@@ -227,10 +228,17 @@ func newProxyHandler(store *connector.Store) http.Handler {
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
+		MaxIdleConns: 100,
+		// Per-host default is 2, which causes connection churn under any
+		// concurrent load against a single customer upstream. Match the
+		// global cap so the pool can actually be reused.
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+		// Matches Nginx's proxy_read_timeout default. A slow-starting
+		// upstream (cold serverless, JIT warm-up, expensive query) should
+		// not fail here when it wouldn't fail at the edge.
+		ResponseHeaderTimeout: 60 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     true,
 	}
@@ -245,9 +253,16 @@ func newProxyHandler(store *connector.Store) http.Handler {
 			pr.Out.URL.Scheme = target.Scheme
 			pr.Out.URL.Host = target.Host
 			// If the allowlist entry carries a path prefix (e.g.
-			// http://internal/api), prepend it to the request path.
+			// http://internal/api), prepend it to the request path. Update
+			// RawPath too when present — Go's Transport writes RawPath to the
+			// wire if non-empty, so modifying only Path would silently drop
+			// the prefix for any request with percent-encoded path chars.
 			if target.Path != "" && target.Path != "/" {
-				pr.Out.URL.Path = strings.TrimRight(target.Path, "/") + pr.Out.URL.Path
+				prefix := strings.TrimRight(target.Path, "/")
+				pr.Out.URL.Path = prefix + pr.Out.URL.Path
+				if pr.Out.URL.RawPath != "" {
+					pr.Out.URL.RawPath = prefix + pr.Out.URL.RawPath
+				}
 			}
 			// Preserve the client's Host header to the upstream — many origins
 			// vhost on it.
@@ -276,7 +291,7 @@ func newProxyHandler(store *connector.Store) http.Handler {
 				return
 			}
 			slog.Warn("upstream error", "err", err, "target", r.Header.Get("X-Service"))
-			http.Error(w, "upstream error", http.StatusBadGateway)
+			writeUpstreamErrorPage(w, err)
 		},
 	}
 
@@ -303,3 +318,63 @@ func newProxyHandler(store *connector.Store) http.Handler {
 // targetURLKey is a private context key for passing the parsed X-Service URL
 // from the outer handler into ReverseProxy.Rewrite without re-parsing.
 type targetURLKey struct{}
+
+// writeUpstreamErrorPage renders a friendly 502 HTML page when the connector
+// fails to reach the customer's origin. The intent is to make the failure
+// boundary obvious: the Ingressive edge and the connector are clearly fine
+// (the user is reading this page, after all) — the issue is between the
+// connector and the application behind it.
+func writeUpstreamErrorPage(w http.ResponseWriter, err error) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusBadGateway)
+	_ = upstreamErrorTmpl.Execute(w, struct{ Err string }{Err: err.Error()})
+}
+
+var upstreamErrorTmpl = template.Must(template.New("upstream_error").Parse(upstreamErrorHTML))
+
+const upstreamErrorHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>502 — Origin server unreachable</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; background: #fafafa; color: #1a1a1a; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  main { max-width: 560px; padding: 2.5rem 2rem; background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; margin: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+  h1 { font-size: 1.5rem; margin: 0 0 1rem; }
+  p { line-height: 1.55; margin: 0 0 1rem; color: #374151; }
+  .chain { display: flex; gap: 0.5rem; align-items: center; margin: 1.75rem 0; font-size: 0.85rem; flex-wrap: wrap; }
+  .chain .node { padding: 0.3rem 0.6rem; border-radius: 4px; }
+  .chain .ok { background: #ecfdf5; color: #047857; }
+  .chain .fail { background: #fef2f2; color: #b91c1c; font-weight: 600; }
+  .chain .arrow { color: #9ca3af; }
+  details { margin-top: 1.5rem; background: #f3f4f6; border-radius: 6px; padding: 0.75rem 1rem; font-size: 0.85rem; }
+  details summary { cursor: pointer; color: #6b7280; }
+  details code { display: block; margin-top: 0.5rem; word-break: break-all; color: #374151; font-size: 0.8rem; }
+  footer { margin-top: 1.75rem; font-size: 0.8rem; color: #9ca3af; }
+  footer a { color: #2563eb; text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Origin server unreachable</h1>
+  <p>Ingressive successfully delivered your request to the connector running in this site's network, but the connector could not reach the application behind it.</p>
+  <p>This is usually transient — the application may be restarting, crashed, or briefly unreachable on its network. Try again in a moment.</p>
+  <div class="chain">
+    <span class="node ok">&#10003; Ingressive edge</span>
+    <span class="arrow">&rarr;</span>
+    <span class="node ok">&#10003; Connector</span>
+    <span class="arrow">&rarr;</span>
+    <span class="node fail">&#10007; Origin</span>
+  </div>
+  <details>
+    <summary>Diagnostic detail</summary>
+    <code>{{.Err}}</code>
+  </details>
+  <footer>Routed by <a href="https://www.ingressive.cloud">Ingressive</a></footer>
+</main>
+</body>
+</html>
+`
