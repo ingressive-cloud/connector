@@ -253,7 +253,22 @@ func newProxyHandler(store *connector.Store) http.Handler {
 			// vhost on it.
 			pr.Out.Host = pr.In.Host
 			pr.Out.Header.Del("X-Service")
-			pr.SetXForwarded()
+
+			// ReverseProxy in Rewrite mode strips inbound Forwarded /
+			// X-Forwarded-* headers before calling us, because in the general
+			// case those values could be client-supplied and spoofable. In our
+			// topology the only thing that talks to the connector is the
+			// edge's Nginx over the Ziti overlay — a trusted hop that
+			// terminates TLS and authoritatively sets these. So copy them
+			// back through. We deliberately do NOT call pr.SetXForwarded():
+			// it would overwrite Proto with "http" (our Ziti listener is
+			// plain HTTP) and append the meaningless Ziti circuit endpoint
+			// to For.
+			for _, h := range [...]string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto"} {
+				if v := pr.In.Header.Values(h); len(v) > 0 {
+					pr.Out.Header[h] = v
+				}
+			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			// Don't log client disconnects as errors.

@@ -306,22 +306,37 @@ func TestProxy_StripsHopByHopHeaders(t *testing.T) {
 	}
 }
 
-func TestProxy_SetsXForwardedFor(t *testing.T) {
-	var seenXFF string
+// The connector is an intermediate hop in a trusted chain: nginx terminates
+// TLS and sets X-Forwarded-{For,Proto,Host} authoritatively. The connector
+// must forward those values untouched, NOT overwrite them based on its own
+// (plain HTTP, Ziti circuit) view of the request.
+func TestProxy_PassesThroughForwardedHeaders(t *testing.T) {
+	var seenFor, seenProto, seenHost string
 	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-		seenXFF = r.Header.Get("X-Forwarded-For")
+		seenFor = r.Header.Get("X-Forwarded-For")
+		seenProto = r.Header.Get("X-Forwarded-Proto")
+		seenHost = r.Header.Get("X-Forwarded-Host")
 		w.WriteHeader(http.StatusOK)
 	})
 	h := newProxyHandler(storeWith(up.URL))
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("X-Service", up.URL)
-	req.RemoteAddr = "203.0.113.5:54321"
+	req.Header.Set("X-Forwarded-For", "203.0.113.5")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "site.example.com")
+	req.RemoteAddr = "10.0.0.1:1234" // would clobber X-Forwarded-For if we called SetXForwarded
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, req)
 
-	if seenXFF == "" {
-		t.Errorf("expected X-Forwarded-For to be set, got empty")
+	if seenFor != "203.0.113.5" {
+		t.Errorf("X-Forwarded-For should pass through unchanged, got %q", seenFor)
+	}
+	if seenProto != "https" {
+		t.Errorf("X-Forwarded-Proto should pass through as https, got %q", seenProto)
+	}
+	if seenHost != "site.example.com" {
+		t.Errorf("X-Forwarded-Host should pass through, got %q", seenHost)
 	}
 }
 
