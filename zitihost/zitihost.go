@@ -244,7 +244,8 @@ func newProxyHandler(store *connector.Store) http.Handler {
 	}
 
 	rp := &httputil.ReverseProxy{
-		Transport: transport,
+		Transport:      transport,
+		ModifyResponse: modifyResponseForCompression,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			// X-Service has already been validated and parsed by the outer
 			// handler — it stashed the parsed *url.URL on the request context.
