@@ -1,14 +1,18 @@
-# Build stage
-FROM golang:1.26-alpine AS build
+# Build stage runs natively on the runner's arch; Go cross-compiles to the
+# target arch via the build-args buildx injects ($BUILDPLATFORM/$TARGETARCH),
+# so multi-arch builds never emulate the compiler under QEMU.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 
-#RUN apk add --no-cache ca-certificates
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /connector .
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w" -o /connector .
 
 # Final stage — minimal Alpine image with CA certs for TLS to the Bifrost API.
 FROM alpine:latest

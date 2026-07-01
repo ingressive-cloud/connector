@@ -1,6 +1,7 @@
 package zitihost
 
 import (
+	"bytes"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -22,9 +23,14 @@ type resettableWriteCloser interface {
 	Reset(io.Writer)
 }
 
+// zstdLevel is SpeedBetterCompression (~zstd level 7–9). On web text this lands
+// around gzip-6 for CPU cost while compressing noticeably smaller. klauspost's
+// zstd only exposes four coarse buckets, so a numeric "9" maps here anyway.
+const zstdLevel = zstd.SpeedBetterCompression
+
 var zstdEncoderPool = sync.Pool{
 	New: func() any {
-		enc, err := zstd.NewWriter(io.Discard, zstd.WithEncoderLevel(zstd.SpeedDefault))
+		enc, err := zstd.NewWriter(io.Discard, zstd.WithEncoderLevel(zstdLevel))
 		if err != nil {
 			// NewWriter only fails on invalid options — programmer error.
 			panic(fmt.Sprintf("zstd encoder construction: %v", err))
@@ -63,9 +69,10 @@ func putEncoder(encoding string, w resettableWriteCloser) {
 // and can actually grow the response. Mirrors nginx gzip_min_length defaults.
 const compressMinBytes = 1000
 
-// compressibleTypes is the set of MIME types we compress. Anything not on this
-// list passes through untouched — image/video/audio/font formats are already
-// compressed, and re-compressing them wastes CPU for no gain.
+// compressibleTypes is the exact-match fallback in isCompressibleType for types
+// not already caught by its text/* and +json/+xml rules (e.g. application/json,
+// application/javascript, application/wasm). Image/video/audio/font formats are
+// deliberately absent — already compressed, so re-compressing wastes CPU.
 var compressibleTypes = map[string]bool{
 	"text/html":                 true,
 	"text/plain":                true,
@@ -86,10 +93,12 @@ var compressibleTypes = map[string]bool{
 }
 
 // modifyResponseForCompression wraps an upstream response with a streaming
-// compressor when it is worth doing. The decision is intentionally header-only
-// (no body buffering): we trust the upstream's Content-Length and Content-Type.
-// If Content-Length is unknown (chunked) we pass through — buffering to decide
-// would add latency-to-first-byte for streamed responses.
+// compressor when it is worth doing. For responses with a known Content-Length
+// the decision is header-only. For chunked responses (unknown length) we peek
+// up to compressMinBytes to decide — this covers the large dynamic-framework
+// class (Node/Rails/Django stream their output, so it arrives chunked) that a
+// Content-Length-only rule would skip. text/event-stream is never touched
+// (isCompressibleType rejects it), so live SSE streams are never buffered.
 //
 // Negotiation prefers zstd over gzip when the client offers both. The edge
 // Nginx normalises Accept-Encoding upstream to one canonical value, so in
@@ -106,9 +115,6 @@ func modifyResponseForCompression(resp *http.Response) error {
 	if resp.StatusCode == http.StatusPartialContent {
 		return nil
 	}
-	if resp.ContentLength < 0 || resp.ContentLength <= compressMinBytes {
-		return nil
-	}
 	if !isCompressibleType(resp.Header.Get("Content-Type")) {
 		return nil
 	}
@@ -121,10 +127,43 @@ func modifyResponseForCompression(resp *http.Response) error {
 		return nil
 	}
 
+	// Known length: compress iff above the floor.
+	if resp.ContentLength >= 0 {
+		if resp.ContentLength <= compressMinBytes {
+			return nil
+		}
+		startStreamingCompressor(resp, encoding, resp.Body, resp.Body)
+		return nil
+	}
+
+	// Unknown length (chunked): read up to the floor to decide. io.ReadFull
+	// returns nil only if it filled the buffer — i.e. the body exceeds
+	// compressMinBytes and is worth compressing. EOF/ErrUnexpectedEOF mean the
+	// whole body is <= the floor (matching the known-length skip rule) or the
+	// read failed; either way replay what we consumed and pass through.
+	orig := resp.Body
+	prefix := make([]byte, compressMinBytes+1)
+	n, err := io.ReadFull(orig, prefix)
+	prefix = prefix[:n]
+	if err != nil {
+		resp.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(prefix), orig), orig}
+		return nil
+	}
+	startStreamingCompressor(resp, encoding, io.MultiReader(bytes.NewReader(prefix), orig), orig)
+	return nil
+}
+
+// startStreamingCompressor swaps resp.Body for a pipe that compresses src with
+// the given encoding, closing body once the copy completes. src may wrap body
+// (e.g. a MultiReader replaying peeked bytes), so the underlying body is closed
+// explicitly rather than via src.
+func startStreamingCompressor(resp *http.Response, encoding string, src io.Reader, body io.Closer) {
 	pr, pw := io.Pipe()
-	src := resp.Body
 	go func() {
-		defer src.Close()
+		defer body.Close()
 		enc := getEncoder(encoding)
 		defer putEncoder(encoding, enc)
 		enc.Reset(pw)
@@ -143,7 +182,6 @@ func modifyResponseForCompression(resp *http.Response) error {
 	addVary(resp.Header, "Accept-Encoding")
 	resp.Header.Del("Content-Length")
 	resp.ContentLength = -1
-	return nil
 }
 
 func isCompressibleType(ct string) bool {
@@ -153,7 +191,22 @@ func isCompressibleType(ct string) bool {
 	if i := strings.IndexByte(ct, ';'); i >= 0 {
 		ct = ct[:i]
 	}
-	return compressibleTypes[strings.ToLower(strings.TrimSpace(ct))]
+	ct = strings.ToLower(strings.TrimSpace(ct))
+	// Never compress Server-Sent Events: an open-ended stream that must flush
+	// per event — buffering or encoding it stalls delivery.
+	if ct == "text/event-stream" {
+		return false
+	}
+	// All text/* is compressible.
+	if strings.HasPrefix(ct, "text/") {
+		return true
+	}
+	// Structured-syntax suffixes (RFC 6839) — e.g. application/vnd.api+json,
+	// application/ld+json, application/problem+json, application/atom+xml.
+	if strings.HasSuffix(ct, "+json") || strings.HasSuffix(ct, "+xml") {
+		return true
+	}
+	return compressibleTypes[ct]
 }
 
 // pickEncoding returns "zstd", "gzip", or "" — the best supported encoding the

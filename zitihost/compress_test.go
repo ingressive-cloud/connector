@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -13,6 +14,74 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 )
+
+// webishText returns pseudo-realistic markup-like content with enough vocabulary
+// and variation that it doesn't compress unrealistically well (the single-phrase
+// largeText hits ~900:1, which flatters the codecs and hides real timing). Seeded
+// for reproducibility.
+func webishText(n int) []byte {
+	words := strings.Fields(`the quick brown fox jumps over a lazy dog div span class id href
+		container header footer nav main section article aside button input label form
+		function return const let var await async import export default value props state
+		render component handler request response status error message user account session
+		color background border margin padding width height display flex grid position`)
+	r := rand.New(rand.NewSource(42))
+	var buf bytes.Buffer
+	for buf.Len() < n {
+		switch r.Intn(10) {
+		case 0:
+			buf.WriteString(`<div class="`)
+			buf.WriteString(words[r.Intn(len(words))])
+			buf.WriteString(`-`)
+			buf.WriteString(strconv.Itoa(r.Intn(10000)))
+			buf.WriteString(`">`)
+		case 1:
+			buf.WriteString(`</div>`)
+		default:
+			buf.WriteString(words[r.Intn(len(words))])
+			buf.WriteByte(' ')
+		}
+	}
+	return buf.Bytes()[:n]
+}
+
+// BenchmarkCompress compares the connector's zstd level against gzip-6 on a
+// realistic web payload, so the "zstd ~9 ≈ gzip 6 in time, much smaller" claim
+// can be checked on the actual klauspost library rather than reference C zstd.
+// Run: go test ./zitihost -bench BenchmarkCompress -benchmem
+func BenchmarkCompress(b *testing.B) {
+	body := webishText(64 << 10) // 64 KiB — a chunky HTML/JS response
+
+	b.Run("zstd_better", func(b *testing.B) {
+		enc, _ := zstd.NewWriter(io.Discard, zstd.WithEncoderLevel(zstdLevel))
+		defer enc.Close()
+		b.SetBytes(int64(len(body)))
+		var size int
+		for i := 0; i < b.N; i++ {
+			var buf bytes.Buffer
+			enc.Reset(&buf)
+			enc.Write(body)
+			enc.Close()
+			size = buf.Len()
+		}
+		b.ReportMetric(float64(len(body))/float64(size), "ratio")
+	})
+
+	b.Run("gzip_6", func(b *testing.B) {
+		gz, _ := gzip.NewWriterLevel(io.Discard, 6)
+		defer gz.Close()
+		b.SetBytes(int64(len(body)))
+		var size int
+		for i := 0; i < b.N; i++ {
+			var buf bytes.Buffer
+			gz.Reset(&buf)
+			gz.Write(body)
+			gz.Close()
+			size = buf.Len()
+		}
+		b.ReportMetric(float64(len(body))/float64(size), "ratio")
+	})
+}
 
 func TestPickEncoding(t *testing.T) {
 	tests := []struct {
@@ -63,6 +132,16 @@ func TestIsCompressibleType(t *testing.T) {
 		{"video/mp4", false},
 		{"font/woff2", false},
 		{"application/octet-stream", false},
+		// Widened coverage: all text/*, plus +json/+xml structured suffixes.
+		{"text/yaml", true},
+		{"text/calendar", true},
+		{"application/vnd.api+json", true},
+		{"application/ld+json", true},
+		{"application/problem+json; charset=utf-8", true},
+		{"application/atom+xml", true},
+		// SSE is text/* but must be excluded so live streams are never buffered.
+		{"text/event-stream", false},
+		{"text/event-stream; charset=utf-8", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.ct, func(t *testing.T) {
@@ -213,12 +292,76 @@ func TestProxy_SkipsCompressionForIncompressibleType(t *testing.T) {
 	}
 }
 
-func TestProxy_SkipsCompressionWhenContentLengthUnknown(t *testing.T) {
-	// No Content-Length → chunked. Per "trust Content-Length" rule, skip.
+// A large chunked (no Content-Length) compressible response is now compressed:
+// the connector peeks past the floor to decide rather than skipping all chunked
+// responses. This unlocks the dynamic-framework class (streamed → chunked).
+func TestProxy_CompressesChunkedResponse(t *testing.T) {
 	body := largeText(8192)
 	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		// Deliberately don't set Content-Length; httptest will chunk.
+		// Deliberately don't set Content-Length; >2KB body forces chunking.
+		w.WriteHeader(http.StatusOK)
+		w.Write(body)
+	})
+	h := newProxyHandler(storeWith(up.URL))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Service", up.URL)
+	req.Header.Set("Accept-Encoding", "zstd")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if ce := rec.Result().Header.Get("Content-Encoding"); ce != "zstd" {
+		t.Fatalf("expected chunked response to be zstd-compressed, got Content-Encoding=%q", ce)
+	}
+	dec, err := zstd.NewReader(rec.Body)
+	if err != nil {
+		t.Fatalf("zstd reader: %v", err)
+	}
+	defer dec.Close()
+	out, err := io.ReadAll(dec)
+	if err != nil {
+		t.Fatalf("zstd decode: %v", err)
+	}
+	if !bytes.Equal(out, body) {
+		t.Errorf("decoded chunked body mismatch (got %d want %d bytes)", len(out), len(body))
+	}
+}
+
+// A chunked response whose total body is below the floor must NOT be compressed,
+// and the peeked bytes must be replayed intact.
+func TestProxy_SkipsSmallChunkedResponse(t *testing.T) {
+	body := largeText(300) // < compressMinBytes
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		// Flush mid-write to force chunked encoding for a sub-floor body.
+		w.WriteHeader(http.StatusOK)
+		w.Write(body[:150])
+		w.(http.Flusher).Flush()
+		w.Write(body[150:])
+	})
+	h := newProxyHandler(storeWith(up.URL))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Service", up.URL)
+	req.Header.Set("Accept-Encoding", "zstd, gzip")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if ce := rec.Result().Header.Get("Content-Encoding"); ce != "" {
+		t.Errorf("small chunked body must not be compressed, got %q", ce)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), body) {
+		t.Errorf("small chunked body must pass through intact (got %d bytes)", rec.Body.Len())
+	}
+}
+
+// Server-Sent Events must never be compressed or buffered, even though they are
+// chunked and text-typed (text/* would otherwise match).
+func TestProxy_SkipsEventStream(t *testing.T) {
+	body := largeText(8192)
+	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		w.Write(body)
 	})
@@ -231,7 +374,10 @@ func TestProxy_SkipsCompressionWhenContentLengthUnknown(t *testing.T) {
 	h.ServeHTTP(rec, req)
 
 	if ce := rec.Result().Header.Get("Content-Encoding"); ce != "" {
-		t.Errorf("expected no Content-Encoding for chunked response, got %q", ce)
+		t.Errorf("text/event-stream must not be compressed, got %q", ce)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), body) {
+		t.Errorf("event-stream body must pass through intact")
 	}
 }
 

@@ -33,6 +33,11 @@ func main() {
 }
 
 func run() error {
+	// Structured JSON to stdout for everything: one event per line so a log
+	// pipeline can parse it, with a human-readable msg so raw `kubectl logs`
+	// stays grok-able.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
 	apiURL := envOr("INGRESSIVE_API_URL", defaultAPIURL)
 	keyID := mustEnv("INGRESSIVE_API_KEY_ID")
 	keySecret := mustEnv("INGRESSIVE_API_KEY_SECRET")
@@ -99,7 +104,7 @@ func run() error {
 	})
 
 	g.Go(func() error {
-		if err := zitihost.Host(gctx, zitiCtx, svcName, store); err != nil {
+		if err := zitihost.Host(gctx, zitiCtx, svcName, instanceLabel, store); err != nil {
 			if gctx.Err() != nil {
 				return nil // shutting down — not a fatal error
 			}

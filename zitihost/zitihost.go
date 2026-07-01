@@ -184,7 +184,7 @@ func ServiceName(zitiCtx ziti.Context) (string, error) {
 // Host starts serving HTTP on the named Ziti service until ctx is cancelled.
 // Incoming HTTP requests are forwarded to the upstream URL in the X-Service
 // header, which must be present in store's allowed list.
-func Host(ctx context.Context, zitiCtx ziti.Context, serviceName string, store *connector.Store) error {
+func Host(ctx context.Context, zitiCtx ziti.Context, serviceName, replica string, store *connector.Store) error {
 	listener, err := zitiCtx.Listen(serviceName)
 	if err != nil {
 		return fmt.Errorf("listen %q: %w", serviceName, err)
@@ -193,7 +193,7 @@ func Host(ctx context.Context, zitiCtx ziti.Context, serviceName string, store *
 	slog.Debug("mesh listener bound", "service", serviceName)
 
 	server := &http.Server{
-		Handler:           newProxyHandler(store),
+		Handler:           accessLog(newProxyHandler(store), replica),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -226,18 +226,14 @@ func newProxyHandler(store *connector.Store) http.Handler {
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
+			KeepAlive: 300 * time.Second,
 		}).DialContext,
 		MaxIdleConns: 100,
-		// Per-host default is 2, which causes connection churn under any
-		// concurrent load against a single customer upstream. Match the
-		// global cap so the pool can actually be reused.
+
 		MaxIdleConnsPerHost: 100,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
-		// Matches Nginx's proxy_read_timeout default. A slow-starting
-		// upstream (cold serverless, JIT warm-up, expensive query) should
-		// not fail here when it wouldn't fail at the edge.
+
 		ResponseHeaderTimeout: 60 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     true,
@@ -287,11 +283,15 @@ func newProxyHandler(store *connector.Store) http.Handler {
 			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			// Don't log client disconnects as errors.
+			// Record the failure for the access-log middleware (it owns the
+			// single per-request log line) before deciding how to respond.
+			if info, ok := r.Context().Value(accessKey{}).(*requestInfo); ok {
+				info.err = err
+			}
+			// Client went away mid-response — nothing to serve.
 			if errors.Is(err, context.Canceled) {
 				return
 			}
-			slog.Warn("upstream error", "err", err, "target", r.Header.Get("X-Service"))
 			writeUpstreamErrorPage(w, err)
 		},
 	}
