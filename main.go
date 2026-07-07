@@ -113,9 +113,11 @@ func run() error {
 		return nil
 	})
 
-	// Watchdog: if we get kicked off the Ziti network, exit non-zero rather
-	// than let the SDK loop logging the same failure forever. The supervisor
-	// will restart us; on restart EnsureWorkingContext re-enrolls if possible.
+	// Watchdog: exit non-zero only if the controller actively revokes our
+	// identity (auth rejection), so the supervisor restarts us and
+	// EnsureWorkingContext re-enrolls if possible. A merely-unreachable
+	// controller is not fatal — WatchHealth keeps retrying so a controller
+	// blip doesn't crashloop the whole connector fleet at once.
 	g.Go(func() error {
 		return zitihost.WatchHealth(gctx, zitiCtx)
 	})

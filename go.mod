@@ -4,8 +4,10 @@ go 1.26.1
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.5
+	github.com/go-openapi/runtime v0.29.3
 	github.com/gorilla/websocket v1.5.3
 	github.com/klauspost/compress v1.18.6
+	github.com/openziti/edge-api v0.27.5
 	github.com/openziti/sdk-golang v1.7.0
 	golang.org/x/sync v0.20.0
 )
@@ -27,7 +29,6 @@ require (
 	github.com/go-openapi/jsonpointer v0.22.5 // indirect
 	github.com/go-openapi/jsonreference v0.21.5 // indirect
 	github.com/go-openapi/loads v0.23.3 // indirect
-	github.com/go-openapi/runtime v0.29.3 // indirect
 	github.com/go-openapi/spec v0.22.4 // indirect
 	github.com/go-openapi/strfmt v0.26.1 // indirect
 	github.com/go-openapi/swag v0.25.5 // indirect
@@ -61,7 +62,6 @@ require (
 	github.com/muhlemmer/gu v0.3.1 // indirect
 	github.com/oklog/ulid/v2 v2.1.1 // indirect
 	github.com/openziti/channel/v4 v4.3.9 // indirect
-	github.com/openziti/edge-api v0.27.5 // indirect
 	github.com/openziti/foundation/v2 v2.0.90 // indirect
 	github.com/openziti/identity v1.0.128 // indirect
 	github.com/openziti/metrics v1.4.5 // indirect

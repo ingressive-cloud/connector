@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-openapi/runtime"
 	"github.com/ingressive-cloud/connector/connector"
 	"github.com/openziti/sdk-golang/ziti"
 	"github.com/openziti/sdk-golang/ziti/enroll"
@@ -133,17 +134,20 @@ func EnsureWorkingContext(dir, jwt string) (ziti.Context, error) {
 	return c, nil
 }
 
-// WatchHealth polls the Ziti controller to detect the connector being kicked
-// from the network. Returns nil on context cancel, or a non-nil error after
-// the controller has been unreachable for `threshold` consecutive polls.
-// The caller should propagate the error up so the process exits — letting the
-// process restart via the supervisor is cleaner than letting the SDK loop
-// indefinitely logging the same failure.
+// WatchHealth polls the Ziti controller to detect the connector's identity
+// being revoked. Returns nil on context cancel, or a non-nil error only when
+// the controller actively rejects our credentials (auth-level 401/403) — that
+// is the one signal that means "this connector is no longer wanted", so we
+// propagate it up to exit.
+//
+// A transient/unreachable controller is deliberately NOT fatal. Every replica
+// polls the same standalone controller, so a brief controller blip would
+// otherwise self-terminate the whole fleet at once, tearing down terminators
+// the mesh would have kept alive. Revocation is already enforced by the mesh
+// (routing stops regardless), so exiting on transient errors buys nothing — we
+// keep serving existing traffic and keep retrying.
 func WatchHealth(ctx context.Context, zitiCtx ziti.Context) error {
-	const (
-		interval  = 30 * time.Second
-		threshold = 3
-	)
+	const interval = 30 * time.Second
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	failures := 0
@@ -152,18 +156,45 @@ func WatchHealth(ctx context.Context, zitiCtx ziti.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if _, err := zitiCtx.GetCurrentIdentity(); err != nil {
-				failures++
-				slog.Warn("ziti health check failed", "err", err, "consecutive_failures", failures)
-				if failures >= threshold {
-					return fmt.Errorf("ziti unreachable after %d consecutive failures: %w", failures, err)
+			_, err := zitiCtx.GetCurrentIdentity()
+			if err == nil {
+				if failures > 0 {
+					slog.Info("ziti recovered")
+					failures = 0
 				}
-			} else if failures > 0 {
-				slog.Info("ziti recovered")
-				failures = 0
+				continue
 			}
+			if isAuthRejection(err) {
+				return fmt.Errorf("ziti identity rejected by controller: %w", err)
+			}
+			failures++
+			slog.Warn("ziti health check failed (controller unreachable) — still serving traffic", "err", err, "consecutive_failures", failures)
 		}
 	}
+}
+
+// isAuthRejection reports whether err is a controller auth-level rejection
+// (HTTP 401/403) — a reachable controller refusing our credentials — versus a
+// connection/network error where the controller is simply unreachable. The
+// edge-api client surfaces the status either as a typed response with a
+// Code() method (e.g. the 401 Unauthorized response) or a *runtime.APIError
+// with a Code field; rest_util.WrapErr keeps the source reachable via Unwrap.
+func isAuthRejection(err error) bool {
+	var coder interface{ Code() int }
+	if errors.As(err, &coder) {
+		switch coder.Code() {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return true
+		}
+	}
+	var apiErr *runtime.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.Code {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return true
+		}
+	}
+	return false
 }
 
 // ServiceName returns the Ziti service name this connector should host.
